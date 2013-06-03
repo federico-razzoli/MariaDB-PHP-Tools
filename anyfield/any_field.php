@@ -22,6 +22,7 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */ 
 
+
 /**
  *	\class		AnyField
  *	\brief		Search a value into any field of any table in a db.
@@ -32,14 +33,36 @@
  *				If you don't, you can use search().
  *				Example:
  *				$af = new AnyField('localhost', 'root', 'root', 'her_db');
- *				$af->search('login_timeout');
+ *				$af->searchAll('login_timeout');
  *				$af->searchInTable('index.html', 'her_tab');
  */
 class AnyField
 {
 	//! Array of existing tables.
-	private /*. mysqli .*/ $db = NULL; 
+	private /*. mysqli .*/  $db     = NULL; 
+	//! Search type to be used to search the value.
+	private /*. string .*/  $sType  = ''; 
 	
+	
+	/**
+	 *	Quote a MariaDB identifier with backticks.
+	 *	@param		string		$id			MariaDB identifier.
+	 *	@return		string
+	 */
+	static private function quoteIdentifier($id)
+	{
+		return '`' . str_replace('`', '``', $id) . '`';
+	}
+	
+	/**
+	 *	Quote a string value with single quotes.
+	 *	@param		string		$val			String value.
+	 *	@return		string
+	 */
+	static private function quoteValue($val, $before = '', $after = '')
+	{
+		return "'" . $before . str_replace("'", "\\'", $val) . $after . "'";
+	}
 	
 	/**
 	 *	The constructor establishes a connection with the DB.
@@ -75,49 +98,97 @@ class AnyField
 	}
 	
 	/**
-	 *	Search for specified value in the specified table.
-	 *	@param		string		$needle			Value to be found.
-	 *	@param		string		$haystack		Table in which the value will be searched.
+	 *	Set the type of search to be used to find value.
+	 *	Valid types:
+	 *	'is' - use = operator;
+	 *	'is_not' - use = operator;
+	 *	'contains' - use LIKE;
+	 *	'starts' - use LIKE;
+	 *	'ends' - use LIKE.
+	 *	Default is 'contains'.
+	 *	@param		string		$sType			Type of search.
 	 *	@return		void
 	 */
-	public function searchInTable($needle, $haystack)
+	public function setSearchType($sType)
 	{
-		$needle = str_replace("'", "\\'", $needle);
-		/*. string .*/ $sql = 'SHOW COLUMNS FROM `' . $haystack . '`;';
+		$this->sType = $sType;
+	}
+	
+	/**
+	 *	Return the SQL expression to search $val with the selected search type.
+	 *	@param		string		$val			Value to search.
+	 *	@return		void
+	 */
+	public function getSearch($val)
+	{
+		switch ($this->sType) {
+			case 'is' :
+				return '= ' . self::quoteValue($val);
+				break;
+			case 'is_not' :
+				return '<> ' . self::quoteValue($val);
+				break;
+			case NULL :
+			case '' :
+			case 'contains' :
+				return 'LIKE ' . self::quoteValue($val, '%', '%');
+				break;
+			case 'starts' :
+				return 'LIKE ' . self::quoteValue($val, '', '%');
+				break;
+			case 'ends' :
+				return '= ' . self::quoteValue($val, '%', '');
+				break;
+		}
+		
+		trigger_error('Invalid Search Type: ', E_USER_ERROR);
+	}
+	
+	/**
+	 *	Search for specified value in the specified table.
+	 *	@param		string		$needle			Value to be found.
+	 *	@param		string		$tabName		Table in which the value will be searched.
+	 *	@return		void
+	 */
+	public function searchInTable($needle, $dbName, $tabName)
+	{
+		/*. string .*/ $sql = 'SELECT `COLUMN_NAME` FROM `information_schema`.`COLUMNS` WHERE `TABLE_NAME` = ' . self::quoteValue($tabName) . ';';
 		/*. object .*/ $cols = $this->db->query($sql);
 		
 		/*. object .*/        $search  = NULL;
 		/*. mixed[mixed] .*/  $field   = array();
 		
 		while ($field = mysqli_fetch_row($cols)) {
-			$sql = 'SELECT True FROM `' . $haystack . '` WHERE `' . $field[0] . '` LIKE \'%' . $needle . '%\';';
+			$sql = 'SELECT TRUE FROM ' . self::quoteIdentifier($dbName) . '.' . self::quoteIdentifier($tabName) . ' WHERE `' . $field[0] . '` ' . $this->getSearch($needle) . ';';
 			$search = $this->db->query($sql);
 			
 			if ($search === FALSE) {
-				echo '<p><strong style="color:red;">Invalid Query: ' . $sql . '</strong></p>';
+				echo '<p><strong style="color:red;">Invalid Query: ' . htmlspecialchars($sql) . '</strong></p>';
 			} elseif (mysqli_fetch_row($search)) {
 				echo '<p>Found in:&nbsp;&nbsp;&nbsp;&nbsp;' .
-					$haystack .'.' . $field[0] . '</p>';
+					htmlspecialchars($tabName) .'.' . htmlspecialchars($field[0]) . '</p>';
 			}
 		}
 	}
 	
 	/**
-	 *	Search for specified value in the whole DB.
+	 *	Search for specified value in all DBs.
 	 *	@param		string		$needle			Value to be found.
 	 *	@return		void
 	 */
-	public function search($needle)
+	public function searchAll($needle)
 	{
-		echo '<h3>Searching for: \'' . $needle . '\'</h3>';
+		/*. string        .*/  $sql     = '';
+		/*. object        .*/  $tables  = NULL;
+		/*. mixed[mixed]  .*/  $tab     = array();
 		
-		/*. string .*/ $sql = 'SHOW FULL TABLES WHERE `Table_type` = \'BASE TABLE\';';
-		/*. object .*/ $tables = $this->db->query($sql);
+		echo '<h3>Searching for: \'' . htmlspecialchars($needle) . '\'</h3>';
 		
-		/*. mixed[mixed] .*/ $tab = array();
+		$sql = 'SELECT `TABLE_SCHEMA`, `TABLE_NAME` FROM `information_schema`.`TABLES` WHERE `TABLE_TYPE` = \'BASE TABLE\';';
+		$tables = $this->db->query($sql);
 		
 		while ($tab = mysqli_fetch_row($tables)) {
-			$this->searchInTable($needle, $tab[0]);
+			$this->searchInTable($needle, $tab[0], $tab[1]);
 		}
 		
 		echo '<p><strong>End Of Search</strong></p><hr/>';
